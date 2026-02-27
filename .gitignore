@@ -1,0 +1,10 @@
+# Dataset and features
+data/
+features/
+checkpoints/
+
+# Python caches
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store

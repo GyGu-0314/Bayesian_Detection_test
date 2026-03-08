@@ -6,7 +6,7 @@
 This repository implements a Two-Stage Hybrid Framework (Xception + Variational Inference Bayesian Network) for Deepfake Detection.
 
 ## Project Structure
-- `data/`: Raw video and image data
+- `data/`: Image data
 - `features/`: Extracted Xception feature vectors
 - `checkpoints/`: Model weights
 - `src/`: Core source code decoupled by function

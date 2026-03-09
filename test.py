@@ -1,21 +1,26 @@
 import streamlit as st
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.transforms as T
 from PIL import Image
 import timm
 import numpy as np
+import os
+import random
 
 # ===========================
-# 1. Device Configuration
+# 1. Configuration & Styling
 # ===========================
+st.set_page_config(page_title="Deepfake Probabilistic Detector", layout="wide")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# ===========================
+# 2. Model Architectures
+#    (Derived strictly from your training notebook)
+# ===========================
 
-# ===========================
-# 2. Model Definition
-#    (Must match training architecture exactly)
-# ===========================
+# --- A. MC Dropout Architecture ---
 class MCDropoutMLP(nn.Module):
     def __init__(self, d_in=2048, hidden=256, p=0.3):
         super().__init__()
@@ -29,137 +34,211 @@ class MCDropoutMLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+# --- B. Bayesian/VI Architecture ---
+class BayesianLinear(nn.Module):
+    def __init__(self, in_features, out_features, prior_std=0.5):
+        super().__init__()
+        self.w_mu  = nn.Parameter(torch.zeros(out_features, in_features))
+        self.w_rho = nn.Parameter(torch.full((out_features, in_features), -3.0))
+        self.b_mu  = nn.Parameter(torch.zeros(out_features))
+        self.b_rho = nn.Parameter(torch.full((out_features,), -3.0))
+        self.prior_std = prior_std
+
+    def forward(self, x):
+        w_sigma = F.softplus(self.w_rho)
+        b_sigma = F.softplus(self.b_rho)
+        # Reparameterization trick: sample w ~ N(mu, sigma^2)
+        w = self.w_mu + w_sigma * torch.randn_like(w_sigma)
+        b = self.b_mu + b_sigma * torch.randn_like(b_sigma)
+        return F.linear(x, w, b)
+
+class VIModel(nn.Module):
+    def __init__(self, in_dim=2048):
+        super().__init__()
+        self.layer = BayesianLinear(in_dim, 1)
+
+    def forward(self, x):
+        return self.layer(x)
 
 # ===========================
-# 3. Load Models
+# 3. Utility Functions
 # ===========================
+
 @st.cache_resource
-def load_models():
-    # --- A. Feature Extractor (Xception) ---
-    # We use timm to load the pretrained Xception model.
-    # This acts as the "eyes" to convert the image into a 2048-dim vector.
-    feature_extractor = timm.create_model("xception", pretrained=True, num_classes=0)
-    feature_extractor.to(DEVICE)
-    feature_extractor.eval()  # Freeze feature extractor
+def load_feature_extractor():
+    """Loads the Xception backbone once."""
+    model = timm.create_model("xception", pretrained=True, num_classes=0)
+    model.to(DEVICE)
+    model.eval()
+    return model
 
-    # --- B. Classifier (MC Dropout Head) ---
-    # This is the "brain" you trained.
-    classifier = MCDropoutMLP(d_in=2048, hidden=256, p=0.3)
+def load_head_model(filepath, architecture_type):
+    """Loads a specific classification head based on type."""
+    if architecture_type == "mc_dropout":
+        model = MCDropoutMLP(d_in=2048, hidden=256, p=0.3)
+    elif architecture_type == "vi":
+        model = VIModel(in_dim=2048)
+    else:
+        return None
 
-    # Load the weights from your .pt file
-    # Ensure 'model.pt' is in the same directory as app.py
     try:
-        checkpoint = torch.load("model.pt", map_location=DEVICE)
-
-        # Handle the dictionary structure based on your saving code
+        checkpoint = torch.load(filepath, map_location=DEVICE)
+        # Handle state_dict key wrapper if present
         if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-            classifier.load_state_dict(checkpoint["state_dict"])
+            model.load_state_dict(checkpoint["state_dict"])
         else:
-            classifier.load_state_dict(checkpoint)
-
+            model.load_state_dict(checkpoint)
+        model.to(DEVICE)
+        return model
     except FileNotFoundError:
-        st.error("Error: 'model.pt' not found. Please upload your model weights.")
-        st.stop()
+        return None
 
-    classifier.to(DEVICE)
-    return feature_extractor, classifier
-
-
-# ===========================
-# 4. Image Preprocessing
-# ===========================
 def process_image(image):
-    # Standard ImageNet normalization required by Xception
+    """Preprocessing pipeline matching the notebook training."""
     transform = T.Compose([
-        T.Resize((299, 299)),
+        T.Resize(342),
+        T.CenterCrop(299),
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-    # Add batch dimension: [C, H, W] -> [1, C, H, W]
     return transform(image).unsqueeze(0).to(DEVICE)
 
-
-# ===========================
-# 5. MC Dropout Inference Logic
-# ===========================
-def mc_predict(feature_extractor, classifier, img_tensor, n_samples=50):
-    # 1. Extract features (Deterministic)
+def predict_uncertainty(feature_extractor, head_model, img_tensor, model_type, n_samples=50):
+    """Generic inference function for both MC Dropout and VI."""
+    
+    # 1. Extract Features
     with torch.no_grad():
-        features = feature_extractor(img_tensor)  # Shape: [1, 2048]
+        features = feature_extractor(img_tensor)
 
-    # 2. Enable Dropout for Monte Carlo sampling
-    classifier.train()
+    # 2. Prepare Model Mode
+    if model_type == "mc_dropout":
+        head_model.train() # Force dropout on
+    else:
+        head_model.eval()  # VI model has stochastic forward pass by default
 
+    # 3. Sampling Loop
     probs = []
     with torch.no_grad():
         for _ in range(n_samples):
-            logits = classifier(features)
+            logits = head_model(features)
             p = torch.sigmoid(logits).item()
             probs.append(p)
 
     probs = np.array(probs)
-    # Return mean probability and standard deviation (uncertainty)
     return probs.mean(), probs.std()
 
-
 # ===========================
-# 6. Streamlit UI Layout
+# 4. App Logic
 # ===========================
-st.set_page_config(page_title="Deepfake Probabilistic Detector")
 
-st.title("Deepfake Detector (MC Dropout)")
-st.markdown("""
-This tool uses Monte Carlo Dropout to analyze images.
-Instead of a simple Yes/No, it provides the **probability** of the image being manipulated by AI tools 
-and the **uncertainty** of the model's prediction.
-""")
+# --- Sidebar: Model Selection ---
+st.sidebar.header("Model Configuration")
+st.sidebar.write("Select models to run:")
 
-# File Uploader
-uploaded_file = st.file_uploader("Upload an image (JPG/PNG)", type=["jpg", "png", "jpeg", "webp"])
+model_options = {
+    "MC Dropout": {"file": "mc_dropout.pt", "type": "mc_dropout"},
+    "Bayesian Linear": {"file": "bayesian_linear.pt", "type": "vi"},
+    "Variational Inference": {"file": "variational_inference.pt", "type": "vi"}
+}
+
+selected_models = st.sidebar.multiselect(
+    "Active Models", 
+    options=list(model_options.keys()),
+    default=["MC Dropout"]
+)
+
+# --- Main Layout ---
+st.title("Bayesian Deepfake Detection")
+st.markdown("Analyze images using uncertainty quantification to detect AI-generated content.")
+
+# Initialize Session State for Sample Image
+if 'selected_image' not in st.session_state:
+    st.session_state.selected_image = None
+
+# --- Sample Images Section ---
+with st.expander("📂 Try a Sample Image", expanded=True):
+    sample_dir = "sample_pics"
+    if os.path.exists(sample_dir):
+        # Get list of valid images
+        valid_ext = ('.png', '.jpg', '.jpeg', '.webp')
+        all_files = [f for f in os.listdir(sample_dir) if f.lower().endswith(valid_ext)]
+        
+        if all_files:
+            # Randomly select up to 4 images
+            if 'random_samples' not in st.session_state:
+                st.session_state.random_samples = random.sample(all_files, min(len(all_files), 4))
+            
+            cols = st.columns(len(st.session_state.random_samples))
+            for idx, file_name in enumerate(st.session_state.random_samples):
+                file_path = os.path.join(sample_dir, file_name)
+                with cols[idx]:
+                    img = Image.open(file_path)
+                    st.image(img, use_column_width=True)
+                    if st.button(f"Analyze Sample {idx+1}", key=f"btn_{idx}"):
+                        st.session_state.selected_image = img
+        else:
+            st.warning("No images found in 'sample_pics' folder.")
+    else:
+        st.warning("Folder 'sample_pics' not found.")
+
+# --- File Uploader ---
+st.divider()
+uploaded_file = st.file_uploader("Or upload your own image", type=["jpg", "png", "jpeg", "webp"])
 
 if uploaded_file:
-    # Display Image
-    image = Image.open(uploaded_file).convert('RGB')
-    st.image(image, caption='Input Image', width=350)
+    st.session_state.selected_image = Image.open(uploaded_file).convert('RGB')
 
-    # Load Models
-    with st.spinner('Initializing models...'):
-        feature_extractor, classifier = load_models()
+# --- Analysis Pipeline ---
+if st.session_state.selected_image is not None:
+    # Display the active image
+    col_img, col_res = st.columns([1, 2])
+    
+    with col_img:
+        st.image(st.session_state.selected_image, caption="Target Image", use_column_width=True)
+    
+    with col_res:
+        st.subheader("Inference Results")
+        
+        if not selected_models:
+            st.error("Please select at least one model from the sidebar.")
+        else:
+            # Load Backbone
+            feature_extractor = load_feature_extractor()
+            img_tensor = process_image(st.session_state.selected_image)
 
-    # Run Inference
-    if st.button('Analyze Image'):
-        with st.spinner('Running Monte Carlo sampling (50 passes)...'):
-            img_tensor = process_image(image)
-            mean_prob, std = mc_predict(feature_extractor, classifier, img_tensor)
-
-        # --- Results Display ---
-        st.divider()
-        st.subheader("Analysis Results")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.info("**Probability Score**")
-            st.markdown(f"# {mean_prob:.2%}")
-
-            # Visual progress bar for probability
-            st.progress(mean_prob)
-
-        with col2:
-            st.warning("**Model Uncertainty (Std Dev)**")
-            st.markdown(f"# {std:.4f}")
-
-            # Contextual help based on uncertainty
-            if std < 0.05:
-                st.caption("The model is very confident in this score.")
-            elif std < 0.15:
-                st.caption("Moderate uncertainty.")
-            else:
-                st.caption("High uncertainty. The model is confused.")
-
-        # Optional: Raw Data Dropdown
-        with st.expander("See Interpretation Guide"):
-            st.markdown("""
-            - **Probability**: The likelihood that the image is manipulated.
-            - **Uncertainty**: How much the model 'wavered' during analysis. High uncertainty often means the image contains artifacts the model hasn't seen before (Out-of-Distribution).
-            """)
+            # Loop through selected models
+            for model_name in selected_models:
+                config = model_options[model_name]
+                
+                # Load specific head
+                head = load_head_model(config["file"], config["type"])
+                
+                if head:
+                    # Run Inference
+                    mean_p, std_dev = predict_uncertainty(
+                        feature_extractor, head, img_tensor, config["type"]
+                    )
+                    
+                    # Display metrics
+                    with st.container():
+                        st.markdown(f"### 🧠 {model_name}")
+                        m_col1, m_col2, m_col3 = st.columns(3)
+                        
+                        m_col1.metric("Fake Probability", f"{mean_p:.2%}")
+                        m_col2.metric("Uncertainty (Std)", f"{std_dev:.4f}")
+                        
+                        # Interpretation
+                        if mean_p > 0.5:
+                            status = "FAKE"
+                            color = "red"
+                        else:
+                            status = "REAL"
+                            color = "green"
+                            
+                        m_col3.markdown(f"Prediction: :{color}[**{status}**]")
+                        
+                        # Visual Bar
+                        st.progress(mean_p)
+                        st.divider()
+                else:
+                    st.error(f"Could not load {config['file']}. Check file path.")

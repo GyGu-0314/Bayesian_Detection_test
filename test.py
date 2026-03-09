@@ -95,6 +95,11 @@ def load_head_model(filepath, architecture_type):
 
 def process_image(image):
     """Preprocessing pipeline matching the notebook training."""
+    # --- FIX START: Force RGB conversion to prevent channel mismatch ---
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    # --- FIX END ---
+
     transform = T.Compose([
         T.Resize(342),
         T.CenterCrop(299),
@@ -172,7 +177,7 @@ with st.expander("📂 Try a Sample Image", expanded=True):
             for idx, file_name in enumerate(st.session_state.random_samples):
                 file_path = os.path.join(sample_dir, file_name)
                 with cols[idx]:
-                    img = Image.open(file_path)
+                    img = Image.open(file_path).convert('RGB') 
                     st.image(img, use_column_width=True)
                     if st.button(f"Analyze Sample {idx+1}", key=f"btn_{idx}"):
                         st.session_state.selected_image = img
@@ -242,3 +247,4 @@ if st.session_state.selected_image is not None:
                         st.divider()
                 else:
                     st.error(f"Could not load {config['file']}. Check file path.")
+

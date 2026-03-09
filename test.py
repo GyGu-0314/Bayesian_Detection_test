@@ -236,8 +236,8 @@ selected_models = st.sidebar.multiselect(
 )
 
 # --- 主界面布局 ---
-st.title("🕵️‍♂️ Bayesian Deepfake Detection")
-st.markdown("Analyze images using **uncertainty quantification** to detect AI-generated content.")
+st.title("Deepfake Detection based on Bayesian Models")
+st.markdown("Analyze images using **probability score** to detect AI-generated content.")
 
 # 初始化 Session State
 if 'selected_image' not in st.session_state:
@@ -323,10 +323,10 @@ if st.session_state.selected_image is not None:
                         
                         # 显示结果卡片
                         with st.container():
-                            st.markdown(f"### 🧠 {model_name}")
+                            st.markdown(f"### {model_name}")
                             m_col1, m_col2, m_col3 = st.columns(3)
                             
-                            m_col1.metric("Fake Probability", f"{mean_p:.2%}")
+                            m_col1.metric("Fake Probability Score", f"{mean_p:.2%}")
                             m_col2.metric("Uncertainty (Std)", f"{std_dev:.4f}")
                             
                             # 结果解释
@@ -352,6 +352,6 @@ if st.session_state.selected_image is not None:
                     else:
                         # 仅当文件确实不存在时才报错
                         if os.path.exists(config["file"]):
-                             st.error(f"❌ Failed to load **{model_name}**. Check logs for details.")
+                             st.error(f"Failed to load **{model_name}**.")
                         else:
-                             st.warning(f"⚠️ File **{config['file']}** not found. Please upload it.")
+                             st.warning(f"File **{config['file']}** not found. Please upload it.")

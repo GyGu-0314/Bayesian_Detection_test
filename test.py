@@ -68,8 +68,8 @@ class VIModel(nn.Module):
 def load_feature_extractor():
     """加载 Xception 特征提取器"""
     try:
-        # 使用 'legacy_xception' 或 'xception'，忽略弃用警告
-        model = timm.create_model("xception", pretrained=True, num_classes=0)
+        # FIX: use 'legacy_xception' to avoid deprecation warning
+        model = timm.create_model("legacy_xception", pretrained=True, num_classes=0)
         model.to(DEVICE)
         model.eval()
         return model
@@ -93,30 +93,46 @@ def safe_load_checkpoint(filepath):
         raise e
 
 def load_head_model(filepath, architecture_type):
-    """加载特定的分类头模型"""
+    """加载特定的分类头模型，返回 (model, mu, sigma) 元组"""
     # 1. 初始化对应的模型结构
     if architecture_type == "mc_dropout":
         model = MCDropoutMLP(d_in=2048, hidden=256, p=0.3)
     elif architecture_type == "vi":
         model = VIModel(in_dim=2048)
     else:
-        return None
+        return None, None, None
 
     # 2. 加载权重
     if not os.path.exists(filepath):
         # 静默失败，在 UI 中提示即可
-        return None
+        return None, None, None
 
     try:
         checkpoint = safe_load_checkpoint(filepath)
         
+        # 提取 mu/sigma（用于特征标准化，部分 checkpoint 中保存了这些值）
+        mu = None
+        sigma = None
+        if isinstance(checkpoint, dict):
+            if "mu" in checkpoint:
+                mu = checkpoint["mu"]
+            if "sigma" in checkpoint:
+                sigma = checkpoint["sigma"]
+
         # 提取 state_dict
         state_dict = None
         if isinstance(checkpoint, dict):
             if "state_dict" in checkpoint:
                 state_dict = checkpoint["state_dict"]
             else:
-                state_dict = checkpoint
+                # 过滤掉非 state_dict 的键（如 mu, sigma, model_type）
+                known_meta_keys = {"mu", "sigma", "model_type"}
+                filtered = {k: v for k, v in checkpoint.items() if k not in known_meta_keys}
+                # 如果过滤后还有内容且看起来像 state_dict（值是 Tensor），就用它
+                if filtered and all(isinstance(v, torch.Tensor) for v in filtered.values()):
+                    state_dict = filtered
+                else:
+                    state_dict = checkpoint
         else:
             state_dict = checkpoint
 
@@ -136,10 +152,10 @@ def load_head_model(filepath, architecture_type):
 
         model.load_state_dict(state_dict, strict=False) # strict=False 允许一定的容错
         model.to(DEVICE)
-        return model
+        return model, mu, sigma
     except Exception as e:
         st.error(f"⚠️ Error loading {filepath}: {str(e)}")
-        return None
+        return None, None, None
 
 def process_image(image):
     """
@@ -161,20 +177,27 @@ def process_image(image):
     ])
     return transform(image).unsqueeze(0).to(DEVICE)
 
-def predict_uncertainty(feature_extractor, head_model, img_tensor, model_type, n_samples=50):
+def predict_uncertainty(feature_extractor, head_model, img_tensor, model_type,
+                        mu=None, sigma=None, n_samples=50):
     """通用的不确定性预测函数"""
     
     # 1. 提取特征
     with torch.no_grad():
         features = feature_extractor(img_tensor)
 
-    # 2. 准备模型模式
+    # 2. 标准化特征（与 Notebook 训练时一致）
+    if mu is not None and sigma is not None:
+        mu_dev = mu.to(DEVICE)
+        sigma_dev = sigma.to(DEVICE)
+        features = (features - mu_dev) / sigma_dev
+
+    # 3. 准备模型模式
     if model_type == "mc_dropout":
         head_model.train() # MC Dropout 需要开启训练模式以激活 Dropout
     else:
         head_model.eval()  # VI 模型自带随机前向传播
 
-    # 3. 蒙特卡洛采样循环
+    # 4. 蒙特卡洛采样循环
     probs = []
     with torch.no_grad():
         for _ in range(n_samples):
@@ -242,7 +265,7 @@ with st.expander("📂 Try a Sample Image", expanded=True):
                     try:
                         # 立即转换为 RGB 防止预览报错
                         img = Image.open(file_path).convert('RGB')
-                        st.image(img, use_container_width=True)
+                        st.image(img, width='stretch')
                         if st.button(f"Analyze Sample {idx+1}", key=f"btn_{idx}"):
                             st.session_state.selected_image = img
                     except Exception as e:
@@ -268,7 +291,7 @@ if st.session_state.selected_image is not None:
     col_img, col_res = st.columns([1, 2])
     
     with col_img:
-        st.image(st.session_state.selected_image, caption="Target Image", use_container_width=True)
+        st.image(st.session_state.selected_image, caption="Target Image", width='stretch')
     
     with col_res:
         st.subheader("Inference Results")
@@ -288,13 +311,14 @@ if st.session_state.selected_image is not None:
                 for model_name in selected_models:
                     config = model_options[model_name]
                     
-                    # 加载模型头
-                    head = load_head_model(config["file"], config["type"])
+                    # 加载模型头（现在也返回 mu/sigma）
+                    head, mu, sigma = load_head_model(config["file"], config["type"])
                     
                     if head:
-                        # 运行推理
+                        # 运行推理（传入 mu/sigma 用于特征标准化）
                         mean_p, std_dev = predict_uncertainty(
-                            feature_extractor, head, img_tensor, config["type"]
+                            feature_extractor, head, img_tensor, config["type"],
+                            mu=mu, sigma=sigma
                         )
                         
                         # 显示结果卡片
@@ -331,4 +355,3 @@ if st.session_state.selected_image is not None:
                              st.error(f"❌ Failed to load **{model_name}**. Check logs for details.")
                         else:
                              st.warning(f"⚠️ File **{config['file']}** not found. Please upload it.")
-

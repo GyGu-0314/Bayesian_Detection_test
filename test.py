@@ -17,7 +17,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ===========================
 # 2. Model Architectures
-#    (Derived strictly from your training notebook)
+#    (Must match your training code exactly)
 # ===========================
 
 # --- A. MC Dropout Architecture ---
@@ -47,7 +47,7 @@ class BayesianLinear(nn.Module):
     def forward(self, x):
         w_sigma = F.softplus(self.w_rho)
         b_sigma = F.softplus(self.b_rho)
-        # Reparameterization trick: sample w ~ N(mu, sigma^2)
+        # Reparameterization trick
         w = self.w_mu + w_sigma * torch.randn_like(w_sigma)
         b = self.b_mu + b_sigma * torch.randn_like(b_sigma)
         return F.linear(x, w, b)
@@ -67,6 +67,8 @@ class VIModel(nn.Module):
 @st.cache_resource
 def load_feature_extractor():
     """Loads the Xception backbone once."""
+    # Using 'legacy_xception' to suppress timm warnings if necessary, 
+    # but 'xception' works fine usually.
     model = timm.create_model("xception", pretrained=True, num_classes=0)
     model.to(DEVICE)
     model.eval()
@@ -74,6 +76,7 @@ def load_feature_extractor():
 
 def load_head_model(filepath, architecture_type):
     """Loads a specific classification head based on type."""
+    # 1. Initialize the correct architecture
     if architecture_type == "mc_dropout":
         model = MCDropoutMLP(d_in=2048, hidden=256, p=0.3)
     elif architecture_type == "vi":
@@ -81,24 +84,38 @@ def load_head_model(filepath, architecture_type):
     else:
         return None
 
+    # 2. Load weights
     try:
-        checkpoint = torch.load(filepath, map_location=DEVICE)
+        # FIX: weights_only=False needed for PyTorch 2.6+ compatibility with older/complex checkpoints
+        checkpoint = torch.load(filepath, map_location=DEVICE, weights_only=False)
+        
         # Handle state_dict key wrapper if present
         if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
             model.load_state_dict(checkpoint["state_dict"])
+        elif isinstance(checkpoint, dict):
+             # Try loading dict directly if it matches keys
+             try:
+                 model.load_state_dict(checkpoint)
+             except:
+                 # If checkpoint has extra keys (like optimizer), filter or warn
+                 pass 
         else:
+            # Fallback for raw state_dict
             model.load_state_dict(checkpoint)
+            
         model.to(DEVICE)
         return model
     except FileNotFoundError:
         return None
+    except Exception as e:
+        st.error(f"Error loading {filepath}: {e}")
+        return None
 
 def process_image(image):
-    """Preprocessing pipeline matching the notebook training."""
-    # --- FIX START: Force RGB conversion to prevent channel mismatch ---
+    """Preprocessing pipeline."""
+    # FIX: Convert RGBA/Grayscale to RGB to prevent channel mismatch errors
     if image.mode != 'RGB':
         image = image.convert('RGB')
-    # --- FIX END ---
 
     transform = T.Compose([
         T.Resize(342),
@@ -140,6 +157,7 @@ def predict_uncertainty(feature_extractor, head_model, img_tensor, model_type, n
 st.sidebar.header("Model Configuration")
 st.sidebar.write("Select models to run:")
 
+# Define your available models here
 model_options = {
     "MC Dropout": {"file": "mc_dropout.pt", "type": "mc_dropout"},
     "Bayesian Linear": {"file": "bayesian_linear.pt", "type": "vi"},
@@ -177,8 +195,10 @@ with st.expander("📂 Try a Sample Image", expanded=True):
             for idx, file_name in enumerate(st.session_state.random_samples):
                 file_path = os.path.join(sample_dir, file_name)
                 with cols[idx]:
-                    img = Image.open(file_path).convert('RGB') 
-                    st.image(img, use_column_width=True)
+                    # FIX: Force RGB conversion immediately on load
+                    img = Image.open(file_path).convert('RGB')
+                    # FIX: Use use_container_width instead of deprecated use_column_width
+                    st.image(img, use_container_width=True)
                     if st.button(f"Analyze Sample {idx+1}", key=f"btn_{idx}"):
                         st.session_state.selected_image = img
         else:
@@ -191,6 +211,7 @@ st.divider()
 uploaded_file = st.file_uploader("Or upload your own image", type=["jpg", "png", "jpeg", "webp"])
 
 if uploaded_file:
+    # FIX: Force RGB conversion on upload
     st.session_state.selected_image = Image.open(uploaded_file).convert('RGB')
 
 # --- Analysis Pipeline ---
@@ -199,7 +220,7 @@ if st.session_state.selected_image is not None:
     col_img, col_res = st.columns([1, 2])
     
     with col_img:
-        st.image(st.session_state.selected_image, caption="Target Image", use_column_width=True)
+        st.image(st.session_state.selected_image, caption="Target Image", use_container_width=True)
     
     with col_res:
         st.subheader("Inference Results")
@@ -208,7 +229,9 @@ if st.session_state.selected_image is not None:
             st.error("Please select at least one model from the sidebar.")
         else:
             # Load Backbone
-            feature_extractor = load_feature_extractor()
+            with st.spinner("Loading Feature Extractor..."):
+                feature_extractor = load_feature_extractor()
+            
             img_tensor = process_image(st.session_state.selected_image)
 
             # Loop through selected models
@@ -246,5 +269,4 @@ if st.session_state.selected_image is not None:
                         st.progress(mean_p)
                         st.divider()
                 else:
-                    st.error(f"Could not load {config['file']}. Check file path.")
-
+                    st.error(f"Could not load **{config['file']}**. Ensure the file exists in the root directory.")

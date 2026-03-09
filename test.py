@@ -329,15 +329,6 @@ if st.session_state.selected_image is not None:
                             m_col1.metric("Fake Probability Score", f"{mean_p:.2%}")
                             m_col2.metric("Uncertainty (Std)", f"{std_dev:.4f}")
                             
-                            # 结果解释
-                            if mean_p > 0.5:
-                                status = "FAKE"
-                                color = "red"
-                            else:
-                                status = "REAL"
-                                color = "green"
-                                
-                            m_col3.markdown(f"Prediction:\n#### :{color}[{status}]")
                             
                             # 可视化进度条
                             st.progress(float(mean_p))

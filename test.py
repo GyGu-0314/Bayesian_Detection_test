@@ -105,12 +105,12 @@ def mc_predict(feature_extractor, classifier, img_tensor, n_samples=50):
 # ===========================
 # 6. Streamlit UI Layout
 # ===========================
-st.set_page_config(page_title="Deepfake Probabilistic Detector", page_icon="🔍")
+st.set_page_config(page_title="Deepfake Probabilistic Detector")
 
-st.title("🔍 Deepfake Detector (MC Dropout)")
+st.title("Deepfake Detector (MC Dropout)")
 st.markdown("""
-This tool uses **Bayesian approximation** (Monte Carlo Dropout) to analyze images.
-Instead of a simple Yes/No, it provides the **probability** of the image being fake 
+This tool uses Monte Carlo Dropout to analyze images.
+Instead of a simple Yes/No, it provides the **probability** of the image being manipulated by AI tools 
 and the **uncertainty** of the model's prediction.
 """)
 
@@ -139,12 +139,11 @@ if uploaded_file:
         col1, col2 = st.columns(2)
 
         with col1:
-            st.info("**Probability Score (Fake)**")
+            st.info("**Probability Score**")
             st.markdown(f"# {mean_prob:.2%}")
 
             # Visual progress bar for probability
             st.progress(mean_prob)
-            st.caption("0% = Definitely Real | 100% = Definitely Fake")
 
         with col2:
             st.warning("**Model Uncertainty (Std Dev)**")
